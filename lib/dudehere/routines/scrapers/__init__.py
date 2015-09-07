@@ -23,7 +23,17 @@ sys.path.append(SCRAPER_DIR)
 from dudehere.routines.database import SQLiteDatabase as DatabaseAPI	
 class MyDatabaseAPI(DatabaseAPI):
 	def _initialize(self):
-		SQL = 'CREATE TABLE IF NOT EXISTS "search_cache"("cache_id" INTEGER PRIMARY KEY AUTOINCREMENT, "hash" TEXT NOT NULL, "display" TEXT NOT NULL, "url" TEXT NOT NULL, "ts" TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'
+		SQL = '''
+			CREATE TABLE IF NOT EXISTS "search_cache" (
+			"cache_id" INTEGER PRIMARY KEY AUTOINCREMENT, 
+			"hash" TEXT NOT NULL,
+			"service" TEXT NOT NULL,
+			"host" TEXT NOT NULL,
+			"display" TEXT NOT NULL,
+			"quality" INTEGER DEFAULT 3,
+			"url" TEXT NOT NULL, 
+			"ts" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			)'''
 		self.execute(SQL)
 		self.commit()
 		ADDON.addon.setSetting('database_init_sqlite', 'true')
@@ -139,29 +149,41 @@ class CommonScraper():
 		self._active_scrapers.append(scraper)
 		
 	def process_results(self, results):
-		#values = []
-		#for r in results: values.append([self.hashid, r.format(), r.url])
-		#DB=MyDatabaseAPI(DB_FILE)
-		#DB.execute_many("INSERT INTO search_cache(hash, display, url) VALUES(?,?,?)", values)
-		#DB.commit()
+		values = []
+		for r in results: values.append([self.hashid, r.service, r.hostname, r.format(), r.quality, r.url])
+		DB=MyDatabaseAPI(DB_FILE)
+		DB.execute_many("INSERT INTO search_cache(hash, service, host, display, quality, url) VALUES(?,?,?,?,?,?)", values)
+		DB.commit()
 		self.search_results += results
 		
 	def search_tvshow(self, showname, season, episode, year=''):
-		'''self.hashid = hashlib.md5(showname+str(season)+str(episode)).hexdigest()
+		self.hashid = hashlib.md5(showname+str(season)+str(episode)).hexdigest()
 		DB.execute("DELETE FROM search_cache WHERE hash=? AND strftime('%s','now') -  strftime('%s',ts) > (3600 * ?)", [self.hashid, DECAY])
 		DB.commit()
-		cached = DB.query_assoc("SELECT display as title, url, strftime('%s','now') -  strftime('%s',ts) < (3600 * ?) as 'fresh' FROM search_cache WHERE hash=? AND fresh=1", [DECAY, self.hashid])
-		'''
-		cached=False
-		if cached:
-			self.search_results = cached
-		else:
-			self._get_active_resolvers()
-			args = {"showname": showname, "season": season, "episode": episode, "year": year, "domains": self.domains}
-			workers = ThreadPool(5)
-			for index in range(0, self.enabled_scrapers):
+		self._get_active_resolvers()
+		args = {"showname": showname, "season": season, "episode": episode, "year": year, "domains": self.domains}
+		workers = ThreadPool(5)
+		for index in range(0, self.enabled_scrapers):
+			service = self.get_scraper_by_index(index).service
+			SQL = '''
+				SELECT
+				"%s" AS hashid,
+				"%s" AS service,
+				host,
+				display as title,
+				url,
+				quality,''' % (self.hashid, service)
+			SQL += '''strftime("%s",'now') -  strftime("%s",ts) < (3600 * ?) AS fresh
+			FROM search_cache 
+			WHERE
+			hash=? AND service=?
+			'''
+			cached = DB.query_assoc(SQL, [DECAY, self.hashid, service])
+			if cached:
+				self.search_results += cached
+			else:
 				workers.queueTask(self.get_scraper_by_index(index).search_tvshow, args, self.process_results)
-			workers.joinAll()
+		workers.joinAll()
 		resolved_url = None
 		raw_url =  self.select_stream()
 		if raw_url:
@@ -169,20 +191,32 @@ class CommonScraper():
 		return resolved_url	
 	
 	def search_movie(self, title, year):
-		'''self.hashid = hashlib.md5(title+str(year)).hexdigest()
+		self.hashid = hashlib.md5(title+str(year)).hexdigest()
 		DB=MyDatabaseAPI(DB_FILE)
 		DB.execute("DELETE FROM search_cache WHERE hash=? AND strftime('%s','now') -  strftime('%s',ts) > (3600 * ?)", [self.hashid, DECAY])
 		DB.commit()
-		cached = DB.query_assoc("SELECT display as title, url, strftime('%s','now') -  strftime('%s',ts) < (3600 * ?) as 'fresh' FROM search_cache WHERE hash=? AND fresh=1", [DECAY, self.hashid])
-		'''
-		cached = False
-		if cached:
-			self.search_results = cached
-		else:
-			self._get_active_resolvers()
-			args = {"title": title, "year": year, "domains": self.domains}
-			workers = ThreadPool(5)
-			for index in range(0, self.enabled_scrapers):
+		self._get_active_resolvers()
+		args = {"title": title, "year": year, "domains": self.domains}
+		workers = ThreadPool(5)
+		for index in range(0, self.enabled_scrapers):
+			service = self.get_scraper_by_index(index).service
+			SQL = '''
+				SELECT
+				"%s" AS hashid,
+				"%s" AS service,
+				host,
+				display as title,
+				url,
+				quality,''' % (self.hashid, service)
+			SQL += '''strftime("%s",'now') -  strftime("%s",ts) < (3600 * ?) AS fresh
+			FROM search_cache 
+			WHERE
+			hash=? AND service=?
+			'''
+			cached = DB.query_assoc(SQL, [DECAY, self.hashid, service])
+			if cached:
+				self.search_results += cached
+			else:
 				workers.queueTask(self.get_scraper_by_index(index).search_movie, args, self.process_results)
 			workers.joinAll()
 		resolved_url = None
@@ -218,12 +252,22 @@ class CommonScraper():
 	def select_stream(self):
 		streams = []
 		options = []
-		try:
-			self.search_results.sort(reverse=True, key=lambda k: (k.quality, k.hostname))
-		except: pass
+		def sort_streams(record):
+			try:
+				return (record.quality, record.hostname)
+			except:
+				return (record['quality'], record['host'])
+		
+		self.search_results.sort(reverse=True, key=lambda k: sort_streams(k))
+
 		for result in self.search_results:
-			streams.append(result.format())
-			options.append(result.url)
+			try:
+				print result
+				streams.append(result.format())
+				options.append(result.url)
+			except:
+				streams.append(result['title'])
+				options.append(result['url'])	
 		dialog = xbmcgui.Dialog()
 		select = dialog.select("Select a stream", streams)
 		if select < 0:
