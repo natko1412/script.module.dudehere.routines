@@ -21,8 +21,10 @@ class TraktAPI():
 		self.quiet = quiet
 		#self.token = token
 		if ADDON.get_setting('trakt_oauth_token') == '':
+			from dudehere.routines.plugin import Plugin
+			plugin = Plugin()
 			pin = plugin.dialog_input('Enter pin from %s' % PIN_URL)
-			response = trakt._authorize(pin)
+			response = self._authorize(pin)
 		else:
 			self._authorize()
 	
